@@ -3,9 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Lädt die Seite alle 30 Sekunden neu. Sobald die App wieder läuft, sieht der Besucher automatisch die App. -->
-  <meta http-equiv="refresh" content="5">
+  <!-- Erkennungsmerkmal: daran merkt die Seite, ob noch die Fallback-Seite kommt. Nicht entfernen. -->
+  <meta name="fallback-page" content="1">
   <meta name="robots" content="noindex">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <!-- Backup, falls JavaScript aus ist -->
+  <noscript><meta http-equiv="refresh" content="5"></noscript>
   <title>Gleich wieder da</title>
   <style>
     :root {
@@ -15,6 +18,9 @@
       --muted: #6b6b70;
       --accent: #4f46e5;
       --border: #e7e5e0;
+      --wait: #f59e0b;
+      --fail: #dc2626;
+      --ok: #16a34a;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -24,6 +30,9 @@
         --muted: #a0a0a8;
         --accent: #818cf8;
         --border: #2a2a31;
+        --wait: #fbbf24;
+        --fail: #f87171;
+        --ok: #4ade80;
       }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -56,23 +65,8 @@
     }
     .icon svg { width: 100%; height: 100%; animation: spin 6s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .icon svg { animation: none; } }
     h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 12px; letter-spacing: -0.01em; }
     p { color: var(--muted); font-size: 1rem; }
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 28px;
-      font-size: 0.875rem;
-      color: var(--muted);
-    }
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #f59e0b;
-      animation: pulse 1.6s ease-in-out infinite;
-    }
-    @keyframes pulse { 50% { opacity: 0.3; } }
     button {
       margin-top: 24px;
       background: var(--accent);
@@ -85,6 +79,61 @@
       cursor: pointer;
     }
     button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    /* Statuszeile unter dem Button */
+    .status {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      margin-top: 20px;
+      min-height: 24px;
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--wait);
+      flex-shrink: 0;
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse { 50% { opacity: 0.3; } }
+
+    /* Lade-Kreisel beim Prüfen */
+    .spinner {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      flex-shrink: 0;
+      animation: spin 0.7s linear infinite;
+    }
+
+    /* Fehlgeschlagen */
+    .status.fail { color: var(--fail); font-weight: 600; animation: shake 0.5s ease; }
+    .status.fail .dot { background: var(--fail); animation: none; }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-6px); }
+      40% { transform: translateX(6px); }
+      60% { transform: translateX(-4px); }
+      80% { transform: translateX(4px); }
+    }
+
+    /* Wieder online */
+    .status.ok { color: var(--ok); font-weight: 600; animation: pop 0.4s ease; }
+    .status.ok .dot { background: var(--ok); animation: none; }
+    @keyframes pop {
+      0% { transform: scale(0.8); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
+    .fade-in { animation: fadein 0.3s ease; }
+    @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .icon svg, .status.fail, .status.ok, .fade-in { animation: none; }
+    }
   </style>
 </head>
 <body>
@@ -100,12 +149,93 @@
     <h1>Wir sind gleich wieder da</h1>
     <p>Wir führen gerade Wartungsarbeiten durch oder starten neu. Bitte versuch es in ein paar Minuten noch einmal.</p>
 
-    <button onclick="location.reload()">Erneut versuchen</button>
+    <button id="retry" type="button">Erneut versuchen</button>
 
-    <div class="status">
+    <div class="status" id="status" aria-live="polite">
       <span class="dot"></span>
-      <span>Seite prüft automatisch alle 10 Sekunden</span>
+      <span>Neuer Versuch in <strong id="countdown">5</strong> Sekunden</span>
     </div>
   </main>
+
+  <script>
+    // ===== Einstellungen =====
+    var SEKUNDEN = 5;            // Wartezeit bis zum nächsten Versuch
+    var FEHLER_ANZEIGE_MS = 1800; // Wie lange "Fehlgeschlagen" stehen bleibt
+    // =========================
+
+    var statusEl = document.getElementById("status");
+    var retryBtn = document.getElementById("retry");
+    var timer = null;
+    var pruefeGerade = false;
+
+    function zeigeCountdown() {
+      var rest = SEKUNDEN;
+      statusEl.className = "status fade-in";
+      statusEl.innerHTML = '<span class="dot"></span><span>Neuer Versuch in <strong id="countdown">' + rest + '</strong> Sekunden</span>';
+      retryBtn.disabled = false;
+
+      clearInterval(timer);
+      timer = setInterval(function () {
+        rest--;
+        if (rest <= 0) {
+          clearInterval(timer);
+          pruefen();
+          return;
+        }
+        var cd = document.getElementById("countdown");
+        if (cd) cd.textContent = rest;
+      }, 1000);
+    }
+
+    function zeigePruefen() {
+      statusEl.className = "status fade-in";
+      statusEl.innerHTML = '<span class="spinner"></span><span>Verbindung wird geprüft …</span>';
+      retryBtn.disabled = true;
+    }
+
+    function zeigeFehlgeschlagen() {
+      statusEl.className = "status";
+      void statusEl.offsetWidth; // Animation neu starten
+      statusEl.className = "status fail";
+      statusEl.innerHTML = '<span class="dot"></span><span>Fehlgeschlagen – noch nicht erreichbar</span>';
+      setTimeout(zeigeCountdown, FEHLER_ANZEIGE_MS);
+    }
+
+    function zeigeOnline() {
+      statusEl.className = "status ok";
+      statusEl.innerHTML = '<span class="dot"></span><span>Wieder online! Du wirst weitergeleitet …</span>';
+      setTimeout(function () { window.location.reload(); }, 800);
+    }
+
+    function pruefen() {
+      if (pruefeGerade) return;
+      pruefeGerade = true;
+      clearInterval(timer);
+      zeigePruefen();
+
+      var start = Date.now();
+
+      fetch(window.location.href, { cache: "no-store", redirect: "follow" })
+        .then(function (antwort) { return antwort.text(); })
+        .then(function (text) {
+          // Kommt noch die Fallback-Seite zurück, ist die App weiterhin offline
+          var nochOffline = text.indexOf('name="fallback-page"') !== -1;
+          return nochOffline;
+        })
+        .catch(function () { return true; })
+        .then(function (nochOffline) {
+          // Kurz warten, damit der Lade-Kreisel sichtbar ist
+          var warte = Math.max(0, 700 - (Date.now() - start));
+          setTimeout(function () {
+            pruefeGerade = false;
+            if (nochOffline) zeigeFehlgeschlagen();
+            else zeigeOnline();
+          }, warte);
+        });
+    }
+
+    retryBtn.addEventListener("click", pruefen);
+    zeigeCountdown();
+  </script>
 </body>
 </html>
